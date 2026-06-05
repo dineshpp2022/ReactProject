@@ -1,0 +1,56 @@
+{
+  "connections": [
+    {
+      "id": "custom_1780651909261_2vczp62x2",
+      "label": "Squad SM",
+      "url": "https://squadsm.odoo.com",
+      "dbName": "squadsm",
+      "availableModules": [
+        "contacts",
+        "helpdesk",
+        "tasks"
+      ]
+    },
+    {
+      "id": "custom_1780655097556_npbiblh3p",
+      "label": "Squad TS",
+      "url": "https://squadts.odoo.com",
+      "dbName": "squadts",
+      "availableModules": [
+        "contacts",
+        "helpdesk",
+        "tasks"
+      ]
+    },
+    {
+      "id": "custom_1780672508124_dfsvdpg7s",
+      "label": "Squad SM",
+      "url": "https://squadsm.odoo.com",
+      "dbName": "squadsm",
+      "availableModules": [
+        "contacts",
+        "helpdesk",
+        "tasks"
+      ]
+    },
+    {
+      "id": "custom_1780672535957_c2eqrrfp5",
+      "label": "Squad TS",
+      "url": "https://squadts.odoo.com",
+      "dbName": "squadts",
+      "availableModules": [
+        "contacts",
+        "helpdesk",
+        "tasks"
+      ]
+    }
+  ],
+  "deletedInstances": [
+    "squadsm",
+    "squadts",
+    "squad-atlas",
+    "custom_1780656515240_vip8i3q4u",
+    "custom_1780655097556_npbiblh3p",
+    "custom_1780651909261_2vczp62x2"
+  ]
+}
