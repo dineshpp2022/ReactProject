@@ -435,12 +435,17 @@ function ConsolidatedDashboard({ authenticatedConnections, onLogout }) {
   };
 
   const openRecordInOdoo = (record) => {
-    if (!record._odooUrl || !record.id) {
-      console.error('Missing URL or ID');
+    if (!record._prefix || !record.id) {
+      console.error('Missing proxy prefix or ID');
       return;
     }
 
-    const recordUrl = `${record._odooUrl}/web#model=${record._model}&id=${record.id}&view_type=form`;
+    // Open through the backend proxy (record._prefix = /odoo-proxy/<id>) so the
+    // server-side session cookie is injected. Opening record._odooUrl directly
+    // hits Odoo with no session_id in the browser -> Odoo redirects to /web/login.
+    // Odoo 19 still honors the legacy /web#model=&id=&view_type=form hash (router
+    // retro-compat rewrites it to /odoo/<model>/<id>).
+    const recordUrl = `${record._prefix}/web#model=${record._model}&id=${record.id}&view_type=form`;
     console.log('Opening URL:', recordUrl);
     window.open(recordUrl, '_blank');
   };
