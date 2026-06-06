@@ -1,4 +1,5 @@
 import express from 'express';
+import httpProxy from 'http-proxy';
 import { CookieJar } from 'tough-cookie';
 import fs from 'fs';
 import path from 'path';
@@ -50,6 +51,54 @@ console.log(`Starting server in ${process.env.NODE_ENV || 'development'} mode`);
 console.log(`Allowed origins:`, ALLOWED_ORIGINS);
 
 const app = express();
+
+// ── Transparent reverse proxy: open the NATIVE Odoo web client with no re-login ──
+// When the browser hits an instance subdomain (e.g. squadsm.<PROXY_DOMAIN>), every
+// path is forwarded straight to that Odoo instance with the server-side session
+// (from the cookie jar captured at app login) injected. Paths are PRESERVED — not
+// moved under a sub-path — so the Odoo 19 OWL client's root-absolute /web/* URLs,
+// lazy assets and bus resolve correctly and the client mounts already authenticated.
+// (The old /odoo-proxy/<id>/* sub-path rewriter could not do this -> blank page.)
+// This middleware MUST run before express.json() so bodies stream to Odoo untouched.
+const proxy = httpProxy.createProxyServer({ changeOrigin: true, secure: true, ws: true });
+
+proxy.on('error', (err, req, res) => {
+  console.error('[transparent-proxy] error:', err.message);
+  if (res && !res.headersSent && typeof res.writeHead === 'function') {
+    res.writeHead(502);
+    res.end('Odoo proxy error: ' + err.message);
+  }
+});
+
+// Persist any rotated Odoo session cookie back into the jar so the session stays alive.
+proxy.on('proxyRes', (proxyRes, req) => {
+  const setCookies = proxyRes.headers['set-cookie'];
+  if (setCookies && req._odooJar && req._odooTarget) {
+    for (const c of setCookies) {
+      req._odooJar.setCookie(c, req._odooTarget).catch(() => {});
+    }
+  }
+});
+
+app.use(async (req, res, next) => {
+  const instanceId = resolveInstanceIdFromHost(req.headers.host);
+  if (!instanceId) return next(); // app/API host -> fall through to normal routing below
+
+  const inst = getInstance(instanceId);
+  if (!inst) return res.status(404).send('Odoo instance not found or has been deleted');
+
+  // Inject the server-held session for this instance (browser carries no Odoo cookie).
+  try {
+    const cookie = await inst.jar.getCookieString(inst.target + req.url);
+    if (cookie) req.headers.cookie = cookie;
+    else delete req.headers.cookie;
+  } catch { /* no session yet */ }
+
+  req._odooTarget = inst.target;
+  req._odooJar = inst.jar;
+  proxy.web(req, res, { target: inst.target, cookieDomainRewrite: '', autoRewrite: true });
+});
+
 app.use(express.json());
 
 // Serve static files from the Vite build output
@@ -143,6 +192,27 @@ const getInstance = (instanceId) => {
   
   // Fall back to default instances only if not deleted
   return INSTANCES[instanceId] || null;
+};
+
+// Map an incoming proxy host to a known instance id, matching the first DNS label
+// against a connection id or dbName (and tolerating a "-proxy" suffix). Returns null
+// for the app/API host (bare "localhost", the SPA origin, etc.) so normal routing runs.
+const resolveInstanceIdFromHost = (host) => {
+  if (!host) return null;
+  const hostname = host.split(':')[0];
+  const parts = hostname.split('.');
+  if (parts.length < 2) return null; // bare host (e.g. "localhost") = app/API, not a proxy
+  const sub = parts[0].replace(/-proxy$/, '');
+  if (!sub || sub === 'www' || sub === 'localhost') return null;
+
+  const data = loadConnections();
+  const deleted = data.deletedInstances || [];
+  const match = (data.connections || []).find(
+    c => (c.id === sub || c.dbName === sub) && !deleted.includes(c.id)
+  );
+  if (match) return match.id;
+  if (INSTANCES[sub] && !deleted.includes(sub)) return sub;
+  return null;
 };
 
 // Connection Management Endpoints
@@ -508,6 +578,19 @@ app.use((req, res) => {
   }
 });
 
-app.listen(5174, () => {
+const server = app.listen(5174, () => {
   console.log('Odoo backend proxy listening on http://localhost:5174');
+});
+
+// Proxy the Odoo bus (websocket / longpolling) for instance subdomains.
+server.on('upgrade', async (req, socket, head) => {
+  const instanceId = resolveInstanceIdFromHost(req.headers.host);
+  if (!instanceId) return socket.destroy();
+  const inst = getInstance(instanceId);
+  if (!inst) return socket.destroy();
+  try {
+    const cookie = await inst.jar.getCookieString(inst.target + req.url);
+    if (cookie) req.headers.cookie = cookie;
+  } catch { /* ignore */ }
+  proxy.ws(req, socket, head, { target: inst.target });
 });
