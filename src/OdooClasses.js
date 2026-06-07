@@ -340,6 +340,7 @@ export class RecordFilter {
       _model: model,
       _prefix: instance.prefix,
       _odooUrl: instance.url,
+      _dbName: instance.dbName,
       _userMap: instance.userMap || {},
       _userEmailMap: instance.userEmailMap || {}
     }));

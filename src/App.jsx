@@ -5,6 +5,14 @@ import { ODOO_CONFIG, findOdooConfig } from './OdooClasses.js';
 import { OdooInstance, OdooAPIClient, RecordFilter } from './OdooClasses.js';
 import './style.css';
 
+// Host that fronts the per-instance transparent Odoo reverse proxy (see server.js).
+// "Open" navigates to  <proto>//<dbName>.<ODOO_PROXY_DOMAIN>/web#...  and the proxy
+// forwards to that Odoo instance with the server-side session injected -> no re-login.
+//   Dev:  '<db>.localhost:5174' resolves to loopback automatically in Chrome/Edge.
+//   Prod: point each '<db>' (or '<db>-proxy') subdomain at the proxy via DNS + IIS,
+//         and set VITE_ODOO_PROXY_DOMAIN at build time.
+const ODOO_PROXY_DOMAIN = import.meta.env.VITE_ODOO_PROXY_DOMAIN || 'localhost:5174';
+
 // Column configuration for different views
 const COLUMN_CONFIG = {
   tasks: [
@@ -435,13 +443,17 @@ function ConsolidatedDashboard({ authenticatedConnections, onLogout }) {
   };
 
   const openRecordInOdoo = (record) => {
-    if (!record._odooUrl || !record.id) {
-      console.error('Missing URL or ID');
+    if (!record._dbName || !record.id) {
+      console.error('Missing instance dbName or record ID');
       return;
     }
 
-    const recordUrl = `${record._odooUrl}/web#model=${record._model}&id=${record.id}&view_type=form`;
-    console.log('Opening URL:', recordUrl);
+    // Go through the per-instance proxy host so the server-side session is injected
+    // and the native Odoo client opens already authenticated (no second login).
+    const proto = window.location.protocol === 'https:' ? 'https:' : 'http:';
+    const origin = `${proto}//${record._dbName}.${ODOO_PROXY_DOMAIN}`;
+    const recordUrl = `${origin}/web#model=${record._model}&id=${record.id}&view_type=form`;
+    console.log('Opening record via proxy:', recordUrl);
     window.open(recordUrl, '_blank');
   };
 
