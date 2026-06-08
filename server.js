@@ -578,8 +578,9 @@ app.use((req, res) => {
   }
 });
 
-const server = app.listen(5174, () => {
-  console.log('Odoo backend proxy listening on http://localhost:5174');
+const PORT = process.env.PORT || 5174;
+const server = app.listen(PORT, () => {
+  console.log(`Odoo backend proxy listening on http://localhost:${PORT}`);
 });
 
 // Proxy the Odoo bus (websocket / longpolling) for instance subdomains.
