@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from 'recharts';
 import * as XLSX from 'xlsx';
-import { ODOO_CONFIG, findOdooConfig } from './OdooClasses.js';
+import { ODOO_CONFIG, findOdooConfig, extractDomain, isSameDomain } from './OdooClasses.js';
 import { OdooInstance, OdooAPIClient, RecordFilter } from './OdooClasses.js';
 import './style.css';
 
@@ -47,31 +47,33 @@ function LoginFlow({ onAllAuthenticated }) {
   const [savedConnections, setSavedConnections] = useState([]);
   const [authenticatedConnections, setAuthenticatedConnections] = useState({});
 
-  // Load saved connections on mount
+  // Load saved connections from localStorage on mount
   useEffect(() => {
-    const loadConnections = async () => {
-      try {
-        const apiUrl = '/api/connections';
-        console.log('[loadConnections] Fetching from:', apiUrl);
-        const response = await fetch(apiUrl);
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-        }
-        const text = await response.text();
-        if (!text) {
-          console.warn('Empty response from /api/connections');
-          setSavedConnections([]);
-          return;
-        }
-        const connections = JSON.parse(text);
+    try {
+      const stored = localStorage.getItem('odoo_connections');
+      if (stored) {
+        const connections = JSON.parse(stored);
         setSavedConnections(connections);
-      } catch (err) {
-        console.error('Failed to load connections:', err);
+        console.log('[LoginFlow] Loaded connections from localStorage:', connections);
+      } else {
         setSavedConnections([]);
       }
-    };
-    loadConnections();
+    } catch (err) {
+      console.error('Failed to load connections from localStorage:', err);
+      setSavedConnections([]);
+    }
   }, []);
+
+  // Save connections to localStorage whenever they change
+  const updateConnectionsInStorage = (connections) => {
+    try {
+      localStorage.setItem('odoo_connections', JSON.stringify(connections));
+      setSavedConnections(connections);
+      console.log('[LoginFlow] Saved connections to localStorage:', connections);
+    } catch (err) {
+      console.error('Failed to save connections to localStorage:', err);
+    }
+  };
 
   const handleAddConnection = async () => {
     setAddConnectionError('');
@@ -90,47 +92,32 @@ function LoginFlow({ onAllAuthenticated }) {
     try {
       setLoading(true);
 
-      // Check if connection already exists
-      if (savedConnections.some(c => c.url === config.url)) {
+      // Extract domain for comparison (remove any paths after domain)
+      const normalizedDomain = extractDomain(config.url);
+
+      // Check if connection with same domain already exists
+      const domainExists = savedConnections.some(c => 
+        isSameDomain(c.url, normalizedDomain)
+      );
+      
+      if (domainExists) {
         setAddConnectionError('This connection is already saved');
         return;
       }
 
-      // Save connection to backend
-      console.log('[handleAddConnection] Sending request:', { url: config.url, label: config.label, dbName: config.dbName });
-      const response = await fetch('/api/connections', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          url: config.url,
-          label: config.label,
-          dbName: config.dbName
-        })
-      });
+      // Create new connection with normalized domain
+      const newConnection = {
+        id: `custom_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+        label: config.label,
+        url: normalizedDomain,  // Store only the domain without path
+        dbName: config.dbName,
+        availableModules: ['contacts', 'helpdesk', 'tasks']
+      };
 
-      console.log('[handleAddConnection] Response status:', response.status, response.statusText);
-
-      if (!response.ok) {
-        const text = await response.text();
-        console.error('[handleAddConnection] Error response:', text);
-        let errorMsg = `Server error (${response.status}): Failed to save connection`;
-        try {
-          const err = JSON.parse(text);
-          errorMsg = err.error || errorMsg;
-        } catch (e) {
-          errorMsg = text || errorMsg;
-        }
-        console.error('[handleAddConnection] Throwing error:', errorMsg);
-        throw new Error(errorMsg);
-      }
-
-      const text = await response.text();
-      console.log('[handleAddConnection] Success response:', text.substring(0, 200));
-      if (!text) {
-        throw new Error('Empty response from server');
-      }
-      const newConnection = JSON.parse(text);
-      setSavedConnections([...savedConnections, newConnection]);
+      // Save to localStorage
+      const updated = [...savedConnections, newConnection];
+      updateConnectionsInStorage(updated);
+      
       setUrl('');
       setAddConnectionError('');
     } catch (err) {
@@ -190,24 +177,10 @@ function LoginFlow({ onAllAuthenticated }) {
   const handleRemoveConnection = async (connId) => {
     try {
       setLoading(true);
-      const response = await fetch(`/api/connections/${connId}`, {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' }
-      });
-
-      if (!response.ok) {
-        const text = await response.text();
-        let errorMsg = 'Failed to delete connection';
-        try {
-          const err = JSON.parse(text);
-          errorMsg = err.error || errorMsg;
-        } catch (e) {
-          errorMsg = text || errorMsg;
-        }
-        throw new Error(errorMsg);
-      }
-
-      setSavedConnections(savedConnections.filter(c => c.id !== connId));
+      
+      // Remove from localStorage
+      const updated = savedConnections.filter(c => c.id !== connId);
+      updateConnectionsInStorage(updated);
       
       // Also remove from authenticated if it was authenticated
       const newAuth = { ...authenticatedConnections };
