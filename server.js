@@ -60,13 +60,33 @@ const app = express();
 // lazy assets and bus resolve correctly and the client mounts already authenticated.
 // (The old /odoo-proxy/<id>/* sub-path rewriter could not do this -> blank page.)
 // This middleware MUST run before express.json() so bodies stream to Odoo untouched.
-const proxy = httpProxy.createProxyServer({ changeOrigin: true, secure: true, ws: true });
+// No ws:true — we handle WebSocket upgrades manually with per-connection proxies
+// to prevent one instance's WS failure (e.g. on-premise without WS configured)
+// from corrupting the shared proxy state and taking down other instances.
+const proxy = httpProxy.createProxyServer({ changeOrigin: true, secure: true });
 
 proxy.on('error', (err, req, res) => {
   console.error('[transparent-proxy] error:', err.message);
-  if (res && !res.headersSent && typeof res.writeHead === 'function') {
+  if (!res) return;
+  if (typeof res.writeHead === 'function' && !res.headersSent) {
     res.writeHead(502);
     res.end('Odoo proxy error: ' + err.message);
+  } else if (typeof res.destroy === 'function') {
+    // WebSocket error: res is actually the socket — destroy it cleanly
+    res.destroy();
+  }
+});
+
+// Add hook to log proxy requests before they're sent
+proxy.on('proxyReq', (proxyReq, req, res) => {
+  // Ensure cookies are properly forwarded
+  if (req.headers.cookie && req._odooTarget) {
+    proxyReq.setHeader('Cookie', req.headers.cookie);
+    console.log(`[proxy-request] ✓ SET Cookie header: ${req.headers.cookie.substring(0, 60)}...`);
+  } else if (req._odooTarget) {
+    console.log(`[proxy-request] ⚠ NO Cookie header for ${req._odooTarget}`);
+    // Remove any default cookies that might be set
+    proxyReq.removeHeader('Cookie');
   }
 });
 
@@ -74,8 +94,11 @@ proxy.on('error', (err, req, res) => {
 proxy.on('proxyRes', (proxyRes, req) => {
   const setCookies = proxyRes.headers['set-cookie'];
   if (setCookies && req._odooJar && req._odooTarget) {
+    console.log(`[proxy-response] Updating cookies from proxyRes for ${req._odooTarget}`);
     for (const c of setCookies) {
-      req._odooJar.setCookie(c, req._odooTarget).catch(() => {});
+      req._odooJar.setCookie(c, req._odooTarget).catch((err) => {
+        console.warn(`[proxy-response] Failed to update cookie: ${err.message}`);
+      });
     }
   }
 });
@@ -89,10 +112,30 @@ app.use(async (req, res, next) => {
 
   // Inject the server-held session for this instance (browser carries no Odoo cookie).
   try {
-    const cookie = await inst.jar.getCookieString(inst.target + req.url);
-    if (cookie) req.headers.cookie = cookie;
-    else delete req.headers.cookie;
-  } catch { /* no session yet */ }
+    // Strip fragment from URL (tough-cookie doesn't handle #hashes well)
+    const urlWithoutFragment = req.url.split('#')[0] || '/';
+    const cookieUrl = inst.target + urlWithoutFragment;
+    
+    console.log(`[transparent-proxy] Requesting cookies for: ${cookieUrl}`);
+    console.log(`[transparent-proxy] Cookie jar contents: ${inst.jar.cookieCount ? inst.jar.cookieCount() + ' cookies' : 'empty'}`);
+    
+    const cookie = await inst.jar.getCookieString(cookieUrl);
+    
+    if (cookie && cookie.trim()) {
+      req.headers.cookie = cookie;
+      console.log(`[transparent-proxy] ✓ INJECTED for ${instanceId}: ${cookie.substring(0, 50)}...`);
+    } else {
+      console.warn(`[transparent-proxy] ✗ NO SESSION for ${instanceId}. Jar empty or cookies don't match path.`);
+      console.warn(`[transparent-proxy]   Instance target: ${inst.target}`);
+      console.warn(`[transparent-proxy]   Request URL: ${req.url}`);
+      console.warn(`[transparent-proxy]   Cookie lookup URL: ${cookieUrl}`);
+      delete req.headers.cookie;
+    }
+  } catch (e) {
+    console.error(`[transparent-proxy] ✗ ERROR for ${instanceId}: ${e.message}`);
+    console.error(`[transparent-proxy]   Stack:`, e.stack);
+    delete req.headers.cookie;
+  }
 
   req._odooTarget = inst.target;
   req._odooJar = inst.jar;
@@ -130,6 +173,7 @@ app.use((req, res, next) => {
 });
 
 const CONNECTIONS_FILE = path.join(__dirname, 'connections.json');
+const SESSIONS_FILE = path.join(__dirname, 'sessions.json');
 const INSTANCE_JARS = new Map(); // Map to store CookieJars for dynamic instances
 
 // Initialize with default instances for backward compatibility
@@ -137,6 +181,89 @@ const INSTANCES = {
   squadsm: { target: 'https://squadsm.odoo.com', jar: new CookieJar() },
   squadts: { target: 'https://squadts.odoo.com', jar: new CookieJar() },
   'squad-atlas': { target: 'https://squad-atlas.odoo.com', jar: new CookieJar() },
+};
+
+// Session persistence helpers
+const persistSessionCookies = async () => {
+  try {
+    const sessions = {};
+    
+    // Get cookies from all instances
+    for (const [id, inst] of Object.entries(INSTANCES)) {
+      try {
+        const cookies = await inst.jar.getCookieString(inst.target);
+        if (cookies) {
+          sessions[id] = { target: inst.target, cookies, timestamp: Date.now() };
+        }
+      } catch (e) {
+        console.warn(`[persistSessionCookies] Could not persist cookies for ${id}:`, e.message);
+      }
+    }
+    
+    // Also persist dynamic instances
+    for (const [id, jar] of INSTANCE_JARS) {
+      const data = loadConnections();
+      const conn = (data.connections || []).find(c => c.id === id);
+      if (conn) {
+        try {
+          const cookies = await jar.getCookieString(conn.url);
+          if (cookies) {
+            sessions[id] = { target: conn.url, cookies, timestamp: Date.now() };
+          }
+        } catch (e) {
+          console.warn(`[persistSessionCookies] Could not persist cookies for dynamic ${id}:`, e.message);
+        }
+      }
+    }
+    
+    if (Object.keys(sessions).length > 0) {
+      fs.writeFileSync(SESSIONS_FILE, JSON.stringify(sessions, null, 2));
+      console.log(`[persistSessionCookies] Saved ${Object.keys(sessions).length} session(s) to disk`);
+    }
+  } catch (error) {
+    console.error('[persistSessionCookies] Error:', error.message);
+  }
+};
+
+const restoreSessionCookies = async () => {
+  try {
+    if (!fs.existsSync(SESSIONS_FILE)) return;
+    
+    const sessions = JSON.parse(fs.readFileSync(SESSIONS_FILE, 'utf-8'));
+    let restored = 0;
+    
+    for (const [id, session] of Object.entries(sessions)) {
+      // Check if session is not too old (24 hours)
+      const ageHours = (Date.now() - session.timestamp) / (1000 * 60 * 60);
+      if (ageHours > 24) {
+        console.log(`[restoreSessionCookies] Skipping expired session for ${id} (${ageHours.toFixed(1)} hours old)`);
+        continue;
+      }
+      
+      try {
+        // Restore to default instances
+        if (INSTANCES[id]) {
+          await INSTANCES[id].jar.setCookie(session.cookies, session.target);
+          restored++;
+          console.log(`[restoreSessionCookies] ✓ Restored session for ${id}`);
+        } else {
+          // Try to restore to dynamic instance
+          const jar = getInstanceJar(id);
+          await jar.setCookie(session.cookies, session.target);
+          restored++;
+          console.log(`[restoreSessionCookies] ✓ Restored dynamic session for ${id}`);
+        }
+      } catch (e) {
+        console.warn(`[restoreSessionCookies] Failed to restore session for ${id}:`, e.message);
+      }
+    }
+    
+    if (restored > 0) {
+      console.log(`[restoreSessionCookies] Successfully restored ${restored}/${Object.keys(sessions).length} session(s)`);
+    }
+  } catch (error) {
+    console.error('[restoreSessionCookies] Error:', error.message);
+  }
 };
 
 // Load connections from file
@@ -236,6 +363,71 @@ app.get('/api/connections', (req, res) => {
     res.json(allConnections);
   } catch (error) {
     console.error('[GET /api/connections] Error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Session status endpoint - check if a session is valid for an instance
+app.get('/api/session/status/:connectionId', async (req, res) => {
+  try {
+    const { connectionId } = req.params;
+    const inst = getInstance(connectionId);
+    
+    if (!inst) {
+      return res.status(404).json({ status: 'not-found', message: 'Instance not found' });
+    }
+    
+    try {
+      // Get all cookies in the jar
+      const allCookies = await inst.jar.getCookies(inst.target);
+      console.log(`[session/status] ${connectionId} has ${allCookies.length} cookie(s) in jar`);
+      allCookies.forEach((c, i) => {
+        console.log(`[session/status]   ${i+1}. ${c.key}=${c.value.substring(0, 30)}... (path="${c.path}", domain="${c.domain}")`);
+      });
+      
+      const cookies = await inst.jar.getCookieString(inst.target);
+      console.log(`[session/status] getCookieString(${inst.target}) returned: ${cookies ? cookies.substring(0, 50) + '...' : 'empty'}`);
+      
+      if (!cookies || cookies.trim() === '') {
+        return res.json({ 
+          status: 'no-session', 
+          message: 'No session cookies stored for this instance',
+          instance: connectionId,
+          jarContents: allCookies.map(c => ({ key: c.key, domain: c.domain, path: c.path }))
+        });
+      }
+      
+      // Verify session is still valid by making a test call
+      const testResp = await fetch(`${inst.target}/web/session/get_session_info`, {
+        method: 'GET',
+        headers: { 'Cookie': cookies }
+      });
+      
+      if (testResp.ok) {
+        const sessionInfo = await testResp.json();
+        return res.json({
+          status: 'active',
+          message: 'Session is valid',
+          instance: connectionId,
+          user_id: sessionInfo.result?.uid,
+          username: sessionInfo.result?.name
+        });
+      } else {
+        return res.json({
+          status: 'expired',
+          message: `Session validation failed (HTTP ${testResp.status})`,
+          instance: connectionId
+        });
+      }
+    } catch (e) {
+      return res.json({
+        status: 'error',
+        message: `Error checking session: ${e.message}`,
+        instance: connectionId
+      });
+    }
+  } catch (error) {
+    console.error('[GET /api/session/status] Error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -383,7 +575,193 @@ app.put('/api/connections/:id', (req, res) => {
   }
 });
 
+// ── Odoo API Proxy Endpoints ──
+// These endpoints proxy Odoo API calls from the browser to the actual Odoo instance,
+// avoiding CORS issues by going through the server.
 
+app.post('/api/odoo/authenticate/:connectionId', async (req, res) => {
+  try {
+    const { connectionId } = req.params;
+    const { username, password, dbName, url } = req.body;
+    
+    console.log(`[authenticate] Starting for ${connectionId} as user: ${username}`);
+    
+    if (!connectionId || !username || !password || !dbName) {
+      return res.status(400).json({ error: 'Missing required fields: connectionId, username, password, dbName' });
+    }
+
+    if (!url) {
+      return res.status(400).json({ error: 'Missing Odoo URL' });
+    }
+
+    // Create or get instance for this connection
+    // If it doesn't exist in connections.json, create it temporarily in memory
+    let inst = getInstance(connectionId);
+    
+    if (!inst) {
+      // Connection not found in file, create it on-the-fly from the provided URL
+      console.log(`[authenticate] Creating on-the-fly connection: ${connectionId} -> ${url}`);
+      const jar = getInstanceJar(connectionId);
+      inst = { target: url, jar };
+    }
+
+    // Make authentication request to the Odoo instance
+    const authBody = JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'call',
+      id: 0,
+      params: {
+        db: dbName,
+        login: username,
+        password: password
+      }
+    });
+
+    console.log(`[authenticate] Making request to ${inst.target}/web/session/authenticate`);
+    
+    const authResp = await fetch(`${inst.target}/web/session/authenticate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: authBody
+    });
+
+    const authData = await authResp.json();
+    
+    // Store session cookies for this instance - handle multiple Set-Cookie headers
+    const setCookies = authResp.headers.getSetCookie?.() || [];
+    if (!setCookies.length) {
+      const setCookie = authResp.headers.get('set-cookie');
+      if (setCookie) setCookies.push(setCookie);
+    }
+    
+    console.log(`[authenticate] Received ${setCookies.length} Set-Cookie header(s)`);
+    
+    if (setCookies.length > 0 && inst.jar) {
+      for (const setCookie of setCookies) {
+        try {
+          await inst.jar.setCookie(setCookie, inst.target);
+          console.log(`[authenticate] ✓ Stored: ${setCookie.substring(0, 60)}...`);
+        } catch (e) {
+          console.warn(`[authenticate] ⚠ Failed to store: ${e.message}`);
+        }
+      }
+      
+      // Immediately persist to disk for recovery
+      persistSessionCookies();
+    } else {
+      console.warn(`[authenticate] ⚠ No Set-Cookie header(s) in auth response`);
+      console.warn(`[authenticate]   Status: ${authResp.status}`);
+      console.warn(`[authenticate]   Headers: ${JSON.stringify(Object.fromEntries(authResp.headers))}`);
+    }
+
+    if (authData?.error) {
+      console.error(`[authenticate] ✗ Auth failed: ${authData.error.message}`);
+      return res.status(401).json({ error: authData.error.message || 'Authentication failed' });
+    }
+
+    // Ensure this connection ID is in connections.json so the transparent proxy
+    // can resolve <dbName>.localhost → this connectionId → correct session jar.
+    // We skip only if already registered and not deleted (no jar mismatch possible).
+    if (dbName && url) {
+      try {
+        const data = loadConnections();
+        const connections = data.connections || [];
+        const deletedIds = data.deletedInstances || [];
+        const alreadyRegistered = connections.some(c => c.id === connectionId && !deletedIds.includes(c.id));
+        if (!alreadyRegistered) {
+          // Remove other non-deleted entries for the same dbName to avoid ambiguous
+          // proxy lookups (only one active entry per dbName should exist).
+          const deduped = connections.filter(c => c.dbName !== dbName || deletedIds.includes(c.id));
+          deduped.push({ id: connectionId, label: dbName, url, dbName, availableModules: ['contacts', 'helpdesk', 'tasks'] });
+          saveConnections({ connections: deduped, deletedInstances: deletedIds });
+          console.log(`[authenticate] Registered ${connectionId} (${dbName}) in connections.json for proxy routing`);
+        }
+      } catch (e) {
+        console.warn(`[authenticate] Could not register connection in connections.json: ${e.message}`);
+      }
+    }
+
+    console.log(`[authenticate] ✓ Successfully authenticated ${connectionId} as ${username}`);
+    res.json(authData.result);
+  } catch (error) {
+    console.error('[authenticate] Error:', error.message);
+    res.status(500).json({ error: `Server error: ${error.message}` });
+  }
+});
+
+app.post('/api/odoo/call/:connectionId', async (req, res) => {
+  try {
+    const { connectionId } = req.params;
+    const { method, params } = req.body;
+
+    if (!connectionId || !method || !params) {
+      return res.status(400).json({ error: 'Missing required fields: connectionId, method, params' });
+    }
+
+    // Try to get existing instance, or create temp one from params if URL provided
+    let inst = getInstance(connectionId);
+    
+    if (!inst && params._odooUrl) {
+      // If connection not found but URL is provided, create temporary instance
+      console.log(`[POST /api/odoo/call] Creating on-the-fly connection: ${connectionId} -> ${params._odooUrl}`);
+      const jar = getInstanceJar(connectionId);
+      inst = { target: params._odooUrl, jar };
+    }
+
+    if (!inst) {
+      return res.status(404).json({ error: 'Connection not found' });
+    }
+
+    // Extract routing info from params
+    const apiUrl = params.url || '/web/dataset/call_kw';
+    
+    // Clean params: remove custom fields that are for server routing only
+    const cleanParams = { ...params };
+    delete cleanParams._odooUrl;
+    delete cleanParams.url;
+
+    // Get stored session cookie
+    let cookie = '';
+    try {
+      cookie = await inst.jar.getCookieString(inst.target);
+    } catch (e) {
+      console.warn('[api/odoo/call] No session cookie yet:', e.message);
+    }
+
+    // Make API call to Odoo with stored session (using cleaned params)
+    const callBody = JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'call',
+      params: cleanParams
+    });
+
+    const callResp = await fetch(`${inst.target}${apiUrl}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(cookie && { 'Cookie': cookie })
+      },
+      body: callBody
+    });
+
+    const callData = await callResp.json();
+
+    // Update session cookie if rotated
+    const setCookie = callResp.headers.get('set-cookie');
+    if (setCookie && inst.jar) {
+      await inst.jar.setCookie(setCookie, inst.target).catch(() => {});
+    }
+
+    if (callData?.error) {
+      return res.status(400).json({ error: callData.error.message || 'API call failed' });
+    }
+
+    res.json(callData.result);
+  } catch (error) {
+    console.error('[POST /api/odoo/call] Error:', error.message);
+    res.status(500).json({ error: `Server error: ${error.message}` });
+  }
+});
 
 // Proxy for Odoo web interface and all resources
 app.all('/odoo-proxy/:instanceId/*', async (req, res) => {
@@ -579,12 +957,27 @@ app.use((req, res) => {
 });
 
 const PORT = process.env.PORT || 5174;
-const server = app.listen(PORT, () => {
+const server = app.listen(PORT, async () => {
   console.log(`Odoo backend proxy listening on http://localhost:${PORT}`);
+  
+  // Restore persisted session cookies on startup
+  await restoreSessionCookies();
+  
+  // Save session cookies periodically (every 5 minutes)
+  setInterval(persistSessionCookies, 5 * 60 * 1000);
 });
 
-// Proxy the Odoo bus (websocket / longpolling) for instance subdomains.
+// Proxy the Odoo bus (WebSocket) for instance subdomains.
+// A fresh proxy is created per connection so a failure on one instance (e.g. an
+// on-premise Odoo without WebSocket configured in Nginx) cannot corrupt the shared
+// proxy state and take down WebSocket on other instances simultaneously.
 server.on('upgrade', async (req, socket, head) => {
+  // Absorb socket-level errors immediately so an ECONNRESET on one instance
+  // cannot emit an unhandled 'error' event that affects other instances.
+  socket.on('error', (err) => {
+    console.warn(`[ws-proxy] socket error (${err.code || err.message}) — ignored`);
+  });
+
   const instanceId = resolveInstanceIdFromHost(req.headers.host);
   if (!instanceId) return socket.destroy();
   const inst = getInstance(instanceId);
@@ -593,5 +986,11 @@ server.on('upgrade', async (req, socket, head) => {
     const cookie = await inst.jar.getCookieString(inst.target + req.url);
     if (cookie) req.headers.cookie = cookie;
   } catch { /* ignore */ }
-  proxy.ws(req, socket, head, { target: inst.target });
+
+  const wsProxy = httpProxy.createProxyServer({ changeOrigin: true, secure: true });
+  wsProxy.on('error', (err) => {
+    console.warn(`[ws-proxy] ${instanceId} WebSocket failed (${err.message}) — Odoo will fall back to long-polling`);
+    if (socket && !socket.destroyed) socket.destroy();
+  });
+  wsProxy.ws(req, socket, head, { target: inst.target });
 });

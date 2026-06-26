@@ -23,8 +23,19 @@
       ]
     },
     {
-      "id": "custom_1780672508124_dfsvdpg7s",
-      "label": "Squad SM",
+      "id": "custom_1782468348413_ci4a2qy",
+      "label": "squadts",
+      "url": "https://squadts.odoo.com",
+      "dbName": "squadts",
+      "availableModules": [
+        "contacts",
+        "helpdesk",
+        "tasks"
+      ]
+    },
+    {
+      "id": "custom_1781761079512_nkiyeqd",
+      "label": "squadsm",
       "url": "https://squadsm.odoo.com",
       "dbName": "squadsm",
       "availableModules": [
@@ -34,10 +45,10 @@
       ]
     },
     {
-      "id": "custom_1780672535957_c2eqrrfp5",
-      "label": "Squad TS",
-      "url": "https://squadts.odoo.com",
-      "dbName": "squadts",
+      "id": "custom_1782396434141_eusd0ls",
+      "label": "asccomm",
+      "url": "https://ascensivetechnologies.com",
+      "dbName": "asccomm",
       "availableModules": [
         "contacts",
         "helpdesk",

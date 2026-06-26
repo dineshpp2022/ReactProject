@@ -14,6 +14,11 @@ export const ODOO_CONFIG = [
     url: 'https://squad-atlas.odoo.com',
     dbName: 'squad-atlas',
     label: 'Squad Atlas'
+  },
+  {
+    url: 'https://ascensivetechnologies.com',
+    dbName: 'asccomm',
+    label: 'Ascensive Technologies'
   }
 ];
 
