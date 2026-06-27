@@ -19,13 +19,54 @@ export const ODOO_CONFIG = [
     url: 'https://squad-atlas.odoo.com',
     dbName: 'squad-atlas',
     label: 'Squad Atlas'
+  },
+  {
+    url: 'https://ascensivetechnologies.com',
+    dbName: 'asccomm',
+    label: 'Ascensive Technologies'
   }
 ];
+
+/**
+ * Extract domain name from URL (without path)
+ * e.g., "https://squadsm.odoo.com/odoo" -> "https://squadsm.odoo.com"
+ */
+export const extractDomain = (url) => {
+  if (!url) return '';
+  try {
+    const urlObj = new URL(url);
+    return `${urlObj.protocol}//${urlObj.hostname}${urlObj.port ? ':' + urlObj.port : ''}`;
+  } catch (e) {
+    return '';
+  }
+};
+
+/**
+ * Check if two URLs have the same domain
+ * e.g., "https://squadsm.odoo.com" and "https://squadsm.odoo.com/odoo" -> true
+ */
+export const isSameDomain = (url1, url2) => {
+  const domain1 = extractDomain(url1);
+  const domain2 = extractDomain(url2);
+  return domain1 && domain2 && domain1.toLowerCase() === domain2.toLowerCase();
+};
 
 export const findOdooConfig = (url) => {
   if (!url) return null;
   const normalizedUrl = url.trim().toLowerCase();
-  return ODOO_CONFIG.find(config => config.url.toLowerCase() === normalizedUrl);
+  const domain = extractDomain(url).toLowerCase();
+  
+  // First try exact match
+  const exactMatch = ODOO_CONFIG.find(config => config.url.toLowerCase() === normalizedUrl);
+  if (exactMatch) return { ...exactMatch, url: extractDomain(url) };
+  
+  // Then try domain match
+  const domainMatch = ODOO_CONFIG.find(config => 
+    isSameDomain(config.url, url)
+  );
+  if (domainMatch) return { ...domainMatch, url: extractDomain(url) };
+  
+  return null;
 };
 
 export class OdooInstance {
@@ -53,16 +94,14 @@ export class OdooAPIClient {
 
   async authenticate(username, password) {
     try {
-      const authUrl = `${this.instance.prefix}/web/session/authenticate`;
+      // Use server API proxy endpoint to avoid CORS issues
+      const authUrl = `/api/odoo/authenticate/${this.instance.id}`;
+      
       const body = JSON.stringify({
-        jsonrpc: '2.0',
-        method: 'call',
-        id: 0,
-        params: {
-          db: this.instance.dbName,
-          login: username,
-          password: password
-        }
+        username,
+        password,
+        dbName: this.instance.dbName,
+        url: this.instance.url  // Pass the Odoo URL to server
       });
 
       console.log('Auth request to:', authUrl);
@@ -72,25 +111,34 @@ export class OdooAPIClient {
         body
       });
 
-      const data = await resp.json();
-      console.log('Auth response:', { status: resp.status, hasError: !!data?.error, result: data?.result });
+      let data;
+      try {
+        data = await resp.json();
+      } catch (parseErr) {
+        const text = await resp.text();
+        console.error('Failed to parse response as JSON. Response text:', text);
+        throw new Error(`Invalid response from server: ${parseErr.message}`);
+      }
+
+      console.log('Auth response:', { status: resp.status, data });
 
       if (!resp.ok || data?.error) {
-        const msg = data?.error?.data?.message || data?.error?.message || `HTTP ${resp.status}`;
+        const msg = data?.error || data?.message || `HTTP ${resp.status}`;
         throw new Error(msg);
       }
 
-      // Extract email from auth response or generate from username
-      const authResult = data.result;
-      if (authResult?.email) {
-        this.currentUserEmail = authResult.email;
+      // Extract email from auth response. If absent (common for on-premise Odoo),
+      // keep the login as-is — App.jsx resolves the real email after fetchUserMap()
+      // using the userId returned here, so the hardcoded domain is not needed.
+      if (data?.email) {
+        this.currentUserEmail = data.email;
         console.log(`✓ Got email from auth response: ${this.currentUserEmail}`);
       } else {
-        this.currentUserEmail = username.includes('@') ? username : (username + '@squadsm.odoo.com');
-        console.log(`Generated email from username: ${this.currentUserEmail}`);
+        this.currentUserEmail = username;
+        console.log(`No email in auth response, will resolve from user map after login`);
       }
 
-      return { success: true, user: authResult };
+      return { success: true, user: data };
     } catch (err) {
       console.error('Authentication error:', err);
       throw err;
@@ -99,35 +147,36 @@ export class OdooAPIClient {
 
   async fetchUserMap() {
     try {
-      console.log(`Fetching users from ${this.instance.label} at ${this.instance.prefix}...`);
-      const userUrl = `${this.instance.prefix}/web/dataset/call_kw/res.users/search_read`;
-      const userBody = JSON.stringify({
-        jsonrpc: '2.0',
+      console.log(`Fetching users from ${this.instance.label}...`);
+      
+      const body = JSON.stringify({
         method: 'call',
         params: {
           model: 'res.users',
           method: 'search_read',
           args: [[]],
-          kwargs: { fields: ['name', 'id', 'email'], limit: 5000 }
+          kwargs: { fields: ['name', 'id', 'email'], limit: 5000 },
+          url: '/web/dataset/call_kw/res.users/search_read',
+          _odooUrl: this.instance.url  // Pass URL for server to use if connection not found
         }
       });
 
-      const userResp = await fetch(userUrl, {
+      const userResp = await fetch(`/api/odoo/call/${this.instance.id}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: userBody
+        body
       });
 
       const userData = await userResp.json();
       console.log(`User API Response from ${this.instance.label}:`, userData);
 
-      if (userData?.result && userData.result.length > 0) {
-        userData.result.forEach(user => {
+      if (userResp.ok && userData && userData.length > 0) {
+        userData.forEach(user => {
           this.userMap[user.id] = user.name;
           this.userEmailMap[user.id] = user.email; // Store email mapping
           console.log(`  ✓ Mapped user ${user.id}: ${user.name} (${user.email})`);
         });
-        console.log(`✓ Successfully fetched ${userData.result.length} users from ${this.instance.label}`);
+        console.log(`✓ Successfully fetched ${userData.length} users from ${this.instance.label}`);
         console.log(`  Current user email being used for filtering: "${this.currentUserEmail}"`);
         return this.userMap;
       } else {
@@ -166,31 +215,31 @@ export class OdooAPIClient {
 
   async fetchRecords(model, fields, domainFilter = []) {
     try {
-      // Fetch real records from Odoo API (removed TEST MODE mock data)
+      // Fetch real records from Odoo API through server proxy to avoid CORS
 
-      const dataUrl = `${this.instance.prefix}/web/dataset/call_kw/${model}/search_read`;
-      const dataBody = JSON.stringify({
-        jsonrpc: '2.0',
+      const body = JSON.stringify({
         method: 'call',
         params: {
           model,
           method: 'search_read',
           args: [domainFilter],
-          kwargs: { fields, limit: 5000 }
+          kwargs: { fields, limit: 5000 },
+          url: `/web/dataset/call_kw/${model}/search_read`,
+          _odooUrl: this.instance.url  // Pass URL for server to use if connection not found
         }
       });
 
-      const resp = await fetch(dataUrl, {
+      const resp = await fetch(`/api/odoo/call/${this.instance.id}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: dataBody
+        body
       });
 
       const data = await resp.json();
 
-      if (resp.ok && !data?.error && data?.result) {
-        console.log(`✓ Found ${data.result.length} ${model} records from ${this.instance.label}`);
-        return data.result;
+      if (resp.ok && data) {
+        console.log(`✓ Found ${data.length || 0} ${model} records from ${this.instance.label}`);
+        return data || [];
       } else if (data?.error) {
         console.error(`✗ API Error from ${this.instance.label}:`, data.error);
       }
@@ -203,21 +252,26 @@ export class OdooAPIClient {
 
   async fetchFields(model) {
     try {
-      const fieldsUrl = `${this.instance.prefix}/web/dataset/call_kw/${model}/fields_get`;
       const body = JSON.stringify({
-        jsonrpc: '2.0',
         method: 'call',
-        params: { model, method: 'fields_get', args: [], kwargs: {} }
+        params: {
+          model,
+          method: 'fields_get',
+          args: [],
+          kwargs: {},
+          url: `/web/dataset/call_kw/${model}/fields_get`,
+          _odooUrl: this.instance.url  // Pass URL for server to use if connection not found
+        }
       });
 
-      const resp = await fetch(fieldsUrl, {
+      const resp = await fetch(`/api/odoo/call/${this.instance.id}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body
       });
 
       const data = await resp.json();
-      return data?.result || {};
+      return data || {};
     } catch (err) {
       console.error(`Error fetching fields for ${model}:`, err);
       return {};
@@ -226,6 +280,23 @@ export class OdooAPIClient {
 }
 
 export class RecordFilter {
+  static filterByUserId(records, userId, fieldKey = 'user_id') {
+    return records.filter(record => {
+      const v = record[fieldKey];
+      if (!v) return false;
+      const id = Array.isArray(v) ? v[0] : v;
+      return id === userId;
+    });
+  }
+
+  static filterTasksByUserId(records, userId) {
+    return records.filter(record => {
+      const ids = record.user_ids;
+      if (!ids || ids.length === 0) return false;
+      return ids.some(u => (Array.isArray(u) ? u[0] : u) === userId);
+    });
+  }
+
   static filterByAssignedUser(records, userId, fieldKey = 'user_id') {
     return records.filter(record => {
       const assignedValue = record[fieldKey];
