@@ -13,6 +13,64 @@ import './style.css';
 //         and set VITE_ODOO_PROXY_DOMAIN at build time.
 const ODOO_PROXY_DOMAIN = import.meta.env.VITE_ODOO_PROXY_DOMAIN || 'localhost:5174';
 
+// Key under which the authenticated session snapshot is persisted so a page
+// refresh (F5) keeps the user in the dashboard instead of dropping to login.
+// sessionStorage (not localStorage) is used deliberately: it survives a reload
+// but clears when the tab/browser closes, matching a login-session lifetime.
+const AUTH_STORAGE_KEY = 'odoo_authenticated_session';
+
+// The live OdooInstance / OdooAPIClient objects can't be stored directly, but the
+// real session lives server-side (cookie jar keyed by connection id, see server.js),
+// so we only need to persist the identity fields and rebuild the objects on reload.
+const serializeAuth = (authConnections) => {
+  const out = {};
+  for (const [connId, data] of Object.entries(authConnections || {})) {
+    const inst = data.instance;
+    out[connId] = {
+      id: inst.id,
+      label: inst.label,
+      url: inst.url,
+      dbName: inst.dbName,
+      prefix: inst.prefix,
+      username: data.username,
+      userId: data.userId,
+      userEmail: data.userEmail,
+    };
+  }
+  return out;
+};
+
+const rehydrateAuth = (stored) => {
+  if (!stored || Object.keys(stored).length === 0) return null;
+  const out = {};
+  for (const [connId, meta] of Object.entries(stored)) {
+    const instance = new OdooInstance(meta.id, meta.label, meta.url, meta.dbName, meta.prefix);
+    const apiClient = new OdooAPIClient(instance);
+    // Restore the resolved email so the dashboard header renders correctly before
+    // fetchUserMap() runs; userMap/userEmailMap are re-fetched by the dashboard.
+    apiClient.currentUserEmail = meta.userEmail || meta.username;
+    out[connId] = {
+      instance,
+      apiClient,
+      username: meta.username,
+      userId: meta.userId,
+      userEmail: meta.userEmail,
+    };
+  }
+  return out;
+};
+
+const loadAuthFromStorage = () => {
+  try {
+    const raw = sessionStorage.getItem(AUTH_STORAGE_KEY);
+    if (!raw) return null;
+    return rehydrateAuth(JSON.parse(raw));
+  } catch (err) {
+    console.error('[App] Failed to restore authenticated session:', err);
+    return null;
+  }
+};
+
 // Column configuration for different views
 const COLUMN_CONFIG = {
   tasks: [
@@ -900,7 +958,22 @@ function ConsolidatedDashboard({ authenticatedConnections, onLogout }) {
 }
 
 function App() {
-  const [authenticated, setAuthenticated] = useState(null);
+  // Lazy init from sessionStorage so a refresh (F5) restores the dashboard
+  // instead of dropping back to the login screen.
+  const [authenticated, setAuthenticated] = useState(() => loadAuthFromStorage());
+
+  // Persist the authenticated snapshot whenever it changes so it survives a reload.
+  useEffect(() => {
+    try {
+      if (authenticated) {
+        sessionStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(serializeAuth(authenticated)));
+      } else {
+        sessionStorage.removeItem(AUTH_STORAGE_KEY);
+      }
+    } catch (err) {
+      console.error('[App] Failed to persist authenticated session:', err);
+    }
+  }, [authenticated]);
 
   const handleLogout = () => {
     setAuthenticated(null);
