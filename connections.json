@@ -54,6 +54,17 @@
         "helpdesk",
         "tasks"
       ]
+    },
+    {
+      "id": "custom_1783321039765_ur4pz2c",
+      "label": "akarigocrm-crmlive-970254",
+      "url": "https://akarigo.odoo.com",
+      "dbName": "akarigocrm-crmlive-970254",
+      "availableModules": [
+        "contacts",
+        "helpdesk",
+        "tasks"
+      ]
     }
   ],
   "deletedInstances": [
