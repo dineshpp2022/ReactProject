@@ -24,6 +24,11 @@ export const ODOO_CONFIG = [
     url: 'https://ascensivetechnologies.com',
     dbName: 'asccomm',
     label: 'Ascensive Technologies'
+  },
+  {
+    url: 'https://akarigo.odoo.com',
+    dbName: 'akarigocrm-crmlive-970254',
+    label: 'Akarigo CRM'
   }
 ];
 
