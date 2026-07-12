@@ -383,12 +383,17 @@ function ConsolidatedDashboard({ authenticatedConnections, onLogout }) {
     tasks: COLUMN_CONFIG.tasks.map(c => c.key),
     helpdesk: COLUMN_CONFIG.helpdesk.map(c => c.key),
   });
+  // stage: '__open__' shows only records in an open (non-folded) stage — the default
+  // landing view. '' means all stages; any other value is a specific stage name.
   const [filters, setFilters] = useState({
     instance: '',
     customer: '',
     createdDateFrom: '',
-    createdDateTo: ''
+    createdDateTo: '',
+    stage: '__open__'
   });
+  // Distinct stage names across the fetched records, for the stage filter dropdown.
+  const [stageOptions, setStageOptions] = useState([]);
 
   useEffect(() => {
     if (Object.keys(authenticatedConnections).length > 0) {
@@ -403,15 +408,20 @@ function ConsolidatedDashboard({ authenticatedConnections, onLogout }) {
     setCurrentPage(1);
     setGroupBy(null);
     setExpandedGroups({});
-    setFilters({instance: '', customer: '', createdDateFrom: '', createdDateTo: ''});
+    setStageOptions([]);
+    setFilters({instance: '', customer: '', createdDateFrom: '', createdDateTo: '', stage: '__open__'});
 
     try {
       const model = view === 'helpdesk' ? 'helpdesk.ticket' : 'project.task';
+      // Stage model carries the `fold` flag: a folded stage is treated as "closed",
+      // everything else is "open" (used for the default open-records view).
+      const stageModel = view === 'helpdesk' ? 'helpdesk.stage' : 'project.task.type';
       const fields = view === 'helpdesk'
         ? ['name', 'create_date', 'partner_id', 'team_id', 'user_id', 'stage_id', 'priority']
         : ['name', 'user_ids', 'date_deadline', 'create_date', 'stage_id', 'priority', 'partner_id', 'project_id'];
 
       let allRecords = [];
+      const stageNameSet = new Set();
 
       for (const [connId, connData] of Object.entries(authenticatedConnections)) {
         const apiClient = connData.apiClient;
@@ -423,6 +433,16 @@ function ConsolidatedDashboard({ authenticatedConnections, onLogout }) {
           // Fetch user map for this instance
           await apiClient.fetchUserMap();
           connData.instance.userMap = apiClient.getUserMap();
+
+          // Fetch this instance's stages so we know which stage IDs are "open"
+          // (fold=false) vs "closed" (fold=true). Stage IDs are per-instance.
+          const stageFoldMap = {};
+          try {
+            const stages = await apiClient.fetchRecords(stageModel, ['name', 'fold'], []);
+            stages.forEach(s => { stageFoldMap[s.id] = !!s.fold; });
+          } catch (stageErr) {
+            console.warn(`   Could not fetch stages (${stageModel}) from ${connData.instance.label}:`, stageErr.message);
+          }
 
           // Resolve the logged-in user's actual email from the fetched user map.
           // The auth response may not include email (common for on-premise Odoo), so
@@ -470,6 +490,17 @@ function ConsolidatedDashboard({ authenticatedConnections, onLogout }) {
             connData.instance.userEmailMap = userEmailMap;
             connData.instance.userMap = apiClient.getUserMap();
             const enrichedRecords = RecordFilter.enrichWithMetadata(filteredRecords, connData.instance, model);
+
+            // Tag each record with its stage name and open/closed status so the
+            // stage filter (and the default open-only view) can work client-side.
+            enrichedRecords.forEach(rec => {
+              const stageId = Array.isArray(rec.stage_id) ? rec.stage_id[0] : rec.stage_id;
+              const stageName = Array.isArray(rec.stage_id) ? rec.stage_id[1] : rec.stage_id;
+              rec._stageName = stageName || 'Undefined';
+              rec._stageFolded = stageId != null ? !!stageFoldMap[stageId] : false;
+              if (stageName) stageNameSet.add(stageName);
+            });
+
             allRecords = [...allRecords, ...enrichedRecords];
           }
         } catch (err) {
@@ -478,6 +509,7 @@ function ConsolidatedDashboard({ authenticatedConnections, onLogout }) {
       }
 
       console.log(`\n✅ Total records to display: ${allRecords.length}`);
+      setStageOptions([...stageNameSet].sort((a, b) => a.localeCompare(b)));
       setRecords(allRecords);
       setActiveView(view);
     } catch (err) {
@@ -613,6 +645,13 @@ function ConsolidatedDashboard({ authenticatedConnections, onLogout }) {
       if (!partnerName || !partnerName.toLowerCase().includes(filters.customer.toLowerCase())) {
         return false;
       }
+    }
+    // Filter by stage: '__open__' = open (non-folded) stages only (default),
+    // '' = all stages, otherwise match the exact stage name.
+    if (filters.stage === '__open__') {
+      if (rec._stageFolded) return false;
+    } else if (filters.stage) {
+      if (rec._stageName !== filters.stage) return false;
     }
     // Filter by created date range
     if (filters.createdDateFrom || filters.createdDateTo) {
@@ -787,6 +826,21 @@ function ConsolidatedDashboard({ authenticatedConnections, onLogout }) {
             ))}
           </select>
 
+          <label htmlFor="filter-stage">Stage:</label>
+          <select
+            id="filter-stage"
+            className="filter-select"
+            value={filters.stage}
+            onChange={(e) => setFilters({...filters, stage: e.target.value})}
+            style={{ maxWidth: '170px' }}
+          >
+            <option value="__open__">Open (default)</option>
+            <option value="">All Stages</option>
+            {stageOptions.map(stage => (
+              <option key={stage} value={stage}>{stage}</option>
+            ))}
+          </select>
+
           <label htmlFor="filter-customer">Customer:</label>
           <input
             id="filter-customer"
@@ -818,9 +872,9 @@ function ConsolidatedDashboard({ authenticatedConnections, onLogout }) {
             style={{ maxWidth: '130px' }}
           />
 
-          {(filters.instance || filters.customer || filters.createdDateFrom || filters.createdDateTo) && (
+          {(filters.instance || filters.customer || filters.createdDateFrom || filters.createdDateTo || filters.stage !== '__open__') && (
             <button
-              onClick={() => setFilters({instance: '', customer: '', createdDateFrom: '', createdDateTo: ''})}
+              onClick={() => setFilters({instance: '', customer: '', createdDateFrom: '', createdDateTo: '', stage: '__open__'})}
               style={{ padding: '5px 10px', background: '#ef4444', color: 'white', border: 'none', borderRadius: '4px', cursor: 'pointer' }}
             >
               Clear Filters
