@@ -1,7 +1,17 @@
 {
   "custom_1781761079512_nkiyeqd": {
     "target": "https://squadsm.odoo.com",
-    "cookies": "session_id=wj9hBT7P6NaXUYgbZnUzvedgqb9xXS5vjbNhBN1y2VWT1IbuzhOosWJQwNW2_ExEJMMKi-9RIjBW6MPyaE1a",
-    "timestamp": 1783849924945
+    "cookies": "session_id=EZMec5YLGMe80OoBgiFVrs7fgD0Zj3LZRaclamCIb9m7J0l2qJO7VkzFqMYOuBCeGoDWlyRwDudDO7XT0CkE",
+    "timestamp": 1784084755055
+  },
+  "custom_1784084693582_tmiz86z": {
+    "target": "https://squadts.odoo.com",
+    "cookies": "session_id=fJ0KaE17bNrIY6RJE7MzxOycb0Ceh7kNQrF-FxDQHRwarmhW3H1Si-bjxZM4YjnOUVbJAaA0XpHLRpw-u8Pt",
+    "timestamp": 1784084755056
+  },
+  "custom_1784084709172_hyr9m62": {
+    "target": "https://squad-atlas.odoo.com",
+    "cookies": "session_id=wrUNrD74FpXbmR5Y1JhKLn4z0d-lzdCJgqdJ26gkfAMym-ayR4_ObhXtqZgzEIG4L86h0iajumm-KMegdB3dHA",
+    "timestamp": 1784084755056
   }
 }
