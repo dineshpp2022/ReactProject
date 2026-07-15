@@ -23,17 +23,6 @@
       ]
     },
     {
-      "id": "custom_1782468348413_ci4a2qy",
-      "label": "squadts",
-      "url": "https://squadts.odoo.com",
-      "dbName": "squadts",
-      "availableModules": [
-        "contacts",
-        "helpdesk",
-        "tasks"
-      ]
-    },
-    {
       "id": "custom_1781761079512_nkiyeqd",
       "label": "squadsm",
       "url": "https://squadsm.odoo.com",
@@ -60,6 +49,28 @@
       "label": "akarigocrm-crmlive-970254",
       "url": "https://akarigo.odoo.com",
       "dbName": "akarigocrm-crmlive-970254",
+      "availableModules": [
+        "contacts",
+        "helpdesk",
+        "tasks"
+      ]
+    },
+    {
+      "id": "custom_1784084693582_tmiz86z",
+      "label": "squadts",
+      "url": "https://squadts.odoo.com",
+      "dbName": "squadts",
+      "availableModules": [
+        "contacts",
+        "helpdesk",
+        "tasks"
+      ]
+    },
+    {
+      "id": "custom_1784084709172_hyr9m62",
+      "label": "squad-atlas",
+      "url": "https://squad-atlas.odoo.com",
+      "dbName": "squad-atlas",
       "availableModules": [
         "contacts",
         "helpdesk",

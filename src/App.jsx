@@ -71,6 +71,15 @@ const loadAuthFromStorage = () => {
   }
 };
 
+// Stage names that count as "closed" for the default open-records view, matched
+// case-insensitively. A record is also treated as closed if its Odoo stage is
+// folded (see fetchRecordsForView). Tasks use an explicit list because their
+// stages aren't reliably marked folded in Odoo.
+const CLOSED_STAGE_NAMES = {
+  tasks: ['completed / on prod', 'completed', 'hold', 'cancelled'],
+  helpdesk: [],
+};
+
 // Column configuration for different views
 const COLUMN_CONFIG = {
   tasks: [
@@ -493,11 +502,17 @@ function ConsolidatedDashboard({ authenticatedConnections, onLogout }) {
 
             // Tag each record with its stage name and open/closed status so the
             // stage filter (and the default open-only view) can work client-side.
+            const closedNames = CLOSED_STAGE_NAMES[view] || [];
             enrichedRecords.forEach(rec => {
               const stageId = Array.isArray(rec.stage_id) ? rec.stage_id[0] : rec.stage_id;
               const stageName = Array.isArray(rec.stage_id) ? rec.stage_id[1] : rec.stage_id;
               rec._stageName = stageName || 'Undefined';
-              rec._stageFolded = stageId != null ? !!stageFoldMap[stageId] : false;
+              // Closed if the stage is folded OR its name is in the closed list.
+              const nameIsClosed = stageName
+                ? closedNames.includes(String(stageName).trim().toLowerCase())
+                : false;
+              const folded = stageId != null ? !!stageFoldMap[stageId] : false;
+              rec._stageFolded = folded || nameIsClosed;
               if (stageName) stageNameSet.add(stageName);
             });
 
